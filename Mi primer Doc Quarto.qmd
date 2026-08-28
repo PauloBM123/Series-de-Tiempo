@@ -1,0 +1,74 @@
+---
+title: "Mi primer documento de Quarto"
+format: html
+---
+
+'Ctrl + Alt + I' para crear un chunk de codigo
+'Alt + -' para esto '<-'
+
+```{r}
+library(tidyverse)
+library(fpp3)
+```
+
+Al igual que python para poner comentarios ponemos "#" pero si ponemos en un chunk "#|" nos metemos a la configuracion del chunk entonces podemos usar la funcion "eval:false" y el chunk no se correra
+
+```{r}
+#| eval: false
+
+stats::filter()
+```
+
+
+```{r}
+tourism
+```
+
+
+```{r}
+index_var(tourism)
+```
+
+
+```{r}
+key_vars(tourism)
+```
+
+```{r}
+key_data(tourism)
+```
+
+```{r}
+distinct(tourism,State)
+```
+
+```{r}
+distinct(filter(tourism, State == "Tasmania"), Region)
+```
+
+
+### Pipes
+Los pipes que se representan con |> sirve para darle a R un orden de como quiero que se ejecute el codigo exactamente, se interpreta como un luego, se usa para saber y diseccionar el codigo para verificar en que parte o paso el codigo trono especificamente. El shortcut de este es 'Ctrl + Shift + M'
+
+```{r}
+tourism |>
+    filter(State == "Tasmania", Region == "East Coast") |> 
+    as_tibble() |> 
+    group_by(Purpose) |> 
+    summarise(mean_trips = mean(Trips))
+```
+
+
+
+```{r}
+tourism |> 
+    filter(State == "Tasmania", Region == "East Coast") |> 
+    autoplot(Trips) +
+    facet_wrap(vars(Purpose), scale = "free_y") + # Esto se usa para separar las tablas por Proposito automaticamente
+    theme(legend.position = "none") + 
+    labs(title = "Viajes por proposito en la Costa Este de Tasmania",
+    subtitle = "Australia",
+    y = "Viajes (miles)", 
+    caption = "Datos de la paqueteria 'fpp3'"
+    )
+```
