@@ -1,0 +1,64 @@
+---
+title: "Untitled"
+format: html
+---
+
+Importamos paqueterias:
+
+```{r}
+library(tidyverse)
+library(fpp3)
+```
+
+importamos la data:
+
+
+```{r}
+medicinas <- read_csv("medicinas.csv")|>
+    select(-Month)               # Seleccionamos todo menos la columna "Month"
+medicinas
+```
+
+Una tabla de excel normal es una tibble, pero para trabajar con series de tiempo, entonces tenemos que convertirla en tsibble
+
+```{r}
+medicinas_tsb <- medicinas |>
+    as_tsibble(index = fecha) |>
+    mutate(
+        fecha = yearmonth(fecha)              # Esto para poder convertir de A/M/D a A/M
+    )
+
+medicinas_tsb
+```
+
+Graficamos la Serie
+
+```{r}
+medicinas_tsb |>
+    autoplot(Cost)
+```
+## Descomposicion
+
+### Descomposicion Clasica
+
+Esta no se hace, es por UNICA vez
+```{r}
+medicinas_tsb |>
+    model(
+        clasica = classical_decomposition(Cost, type = "additive")
+    ) |>
+        components() |>
+        autoplot()
+```
+
+
+### Descomposicion STL
+
+```{r}
+medicinas_tsb |>
+    model(
+        stl = STL(Cost, robust = TRUE)
+    ) |>
+        components() |>
+        autoplot()
+```
