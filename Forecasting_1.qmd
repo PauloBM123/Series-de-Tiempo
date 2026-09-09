@@ -1,0 +1,109 @@
+---
+title: "Pronosticar Importaciones de Autos"
+subtitle: "Importaciones en EEUU de autos mexicanos"
+date: 2026-09-09
+format: 
+html : 
+    embed-resources: true
+---
+
+### Carga de Data
+```{r}
+
+library(tidyverse)
+library(fpp3)
+
+import <- tidyquant :: tq_get(
+    x = "Mauinsa",
+    get = "economic.data",
+    from = "1993-01-01",
+    to = "2025-10-01"
+) |> 
+    mutate(
+        date = yearmonth(date)
+    ) |> 
+    as_tsibble(index = date)
+
+```
+
+
+### Modelo STL de referencia
+Este modelo lo hago para tener una referencia clara de la estacionalidad y tendencia
+```{r}
+import |> 
+    model(
+        stl = STL(price, robust = TRUE)
+    ) |> 
+    components() |> 
+    autoplot()
+
+```
+
+### Pronostico 
+```{r}
+h <- 14
+
+train <- import |> 
+  slice_head(n = nrow(import) - h)
+
+test <- import |> 
+  slice_tail(n = h)
+```
+
+```{r}
+fit_train <- train |>
+  model(
+    Media = MEAN(price),
+    Naive = NAIVE(price),
+    Snaive = SNAIVE(price),
+    Deriva = RW(price ~ drift())
+  )
+
+fc_train <- fit_train |>
+  forecast(h = h)
+
+accuracy(fc_train, import) |>
+  arrange(RMSE) 
+```
+
+```{r}
+fit_train |>
+  select(Snaive) |>
+  gg_tsresiduals() +
+  labs(title = "Análisis de Residuales del Mejor Modelo")
+```
+
+```{r}
+fit_final <- import |>
+  model(
+    Snaive = SNAIVE(price) 
+  )
+
+fc_final <- fit_final |>
+  forecast(h = h)
+
+fc_final |>
+  autoplot(import |> filter_index("2020-10" ~ .), level = 95) +
+  labs(
+    title = "Pronóstico Final de Importaciones a 14 meses",
+    subtitle = "Intervalo de confianza al 95%",
+    y = "Valor de Importaciones",
+    x = "Fecha"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+fit_train |>
+  augment() |>
+  filter(.model == "Snaive") |>
+  features(.innov, ljung_box, lag = 24, dof = 0)
+```
+
+### Conclusiones
+
+Para comenzar, decidí explorar la serie de tiempo original mediante una descomposición STL. Al hacerlo, identifiqué que la serie presentaba una clara tendencia y estacionalidad, lo cual me dio una idea inicial sobre el tipo de modelo que debía implementar.
+
+Finalmente, opté por utilizar el modelo Seasonal Naïve. Al comparar las predicciones de los distintos modelos evaluados, noté que este era el que mejor se ajustaba a los datos. El test de Portmanteau no hicieron más que confirmar esta observación, ya que el Seasonal Naïve arrojó los mejores resultados en todas las métricas. Por lo tanto, fue el modelo que utilicé para mi pronóstico (forecast) final, y quedé bastante satisfecho con el resultado.
+
+Sin embargo, al observar nuevamente la gráfica y el componente de tendencia de la descomposición STL, considero que el modelo podría optimizarse si se le incorpora un factor de tendencia. Dado que la serie de tiempo finalizaba con una tendencia bastante pronunciada, ajustar el modelo para capturar este comportamiento podría aumentar significativamente su precisión.

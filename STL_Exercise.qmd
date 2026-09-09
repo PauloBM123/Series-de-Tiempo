@@ -7,7 +7,7 @@ Importamos paqueterias:
 
 ```{r}
 library(tidyverse)
-library(fpp3)
+    library(fpp3)
 ```
 
 importamos la data:
