@@ -2,9 +2,8 @@
 title: "Pronosticar Importaciones de Autos"
 subtitle: "Importaciones en EEUU de autos mexicanos"
 date: 2026-09-09
-format: 
-html : 
-    embed-resources: true
+format: html 
+embed-resources: true
 ---
 
 ### Carga de Data
