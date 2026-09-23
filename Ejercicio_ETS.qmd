@@ -91,7 +91,7 @@ vm_fit_ex <- vm_train |>
 vm_fit_ex |>
   forecast(h = h) |>
   accuracy(vm_tsb) |>
-  arrange(MAPE) |> 
+  arrange(MAPE)
 ```
 
 
@@ -132,7 +132,16 @@ bind_rows(
 
 
 ```{r}
-vm_train |> model(STL(price, robust = TRUE)) |> components() |> autoplot()
-vm_train |> model(STL(log(price), robust = TRUE)) |> components() |> autoplot()
-vm_train |> model(STL(box_cox(price, lambda), robust = TRUE)) |> components() |> autoplot()
+vm_train |> 
+  model(STL(price, robust = TRUE)) |> 
+  components() |> 
+  autoplot()
+vm_train |> 
+  model(STL(log(price), robust = TRUE)) |> 
+  components() |> 
+  autoplot()
+vm_train |> 
+  model(STL(box_cox(price, lambda), robust = TRUE)) |> 
+  components() |> 
+  autoplot()
 ```
