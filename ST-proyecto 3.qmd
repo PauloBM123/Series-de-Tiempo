@@ -181,10 +181,6 @@ fit_cv <- ventas_cv |>
     m2_stl_ets = spec_m2,
     tslm_cal   = spec_tslm,
     arima_k4   = spec_arima
-  ) |>
-  mutate(
-    comb_m2_arima = (m2_stl_ets + arima_k4) / 2,
-    comb_3        = (m2_stl_ets + arima_k4 + tslm_cal) / 3
   )
 ```
 
@@ -203,9 +199,23 @@ plan(sequential)
 #| label: evaluacion-mape
 real <- ventas |> as_tibble() |> select(semana, real = total)
 
-errores <- fc_cv |>
+preds_base <- fc_cv |>
   as_tibble() |>
-  select(.id, .model, semana, .mean) |>
+  select(.id, .model, semana, .mean)
+
+preds_comb3 <- preds_base |>
+  filter(.model %in% c("m2_stl_ets", "arima_k4", "tslm_cal")) |>
+  group_by(.id, semana) |>
+  summarise(.mean = mean(.mean, na.rm = TRUE), .groups = "drop") |>
+  mutate(.model = "comb_3")
+
+preds_comb2 <- preds_base |>
+  filter(.model %in% c("m2_stl_ets", "arima_k4")) |>
+  group_by(.id, semana) |>
+  summarise(.mean = mean(.mean, na.rm = TRUE), .groups = "drop") |>
+  mutate(.model = "comb_m2_arima")
+
+errores <- bind_rows(preds_base, preds_comb3, preds_comb2) |>
   inner_join(real, by = "semana") |>
   group_by(.id, .model) |>
   mutate(h = row_number()) |>
@@ -329,16 +339,32 @@ validar_entrega <- function(fc, nombre, maestria = FALSE,
 }
 
 fit_final <- ventas |>
-  model(m2 = spec_m2, arima_k4 = spec_arima, tslm_cal = spec_tslm) |>
-  mutate(equipo_1 = (m2 + arima_k4 + tslm_cal) / 3) |>
-  select(equipo_1)
+  model(m2 = spec_m2, arima_k4 = spec_arima, tslm_cal = spec_tslm)
 
 futuro <- new_data(ventas, 12) |> left_join(cal, by = "semana")
 stopifnot(min(futuro$semana) == yearweek("2026 W31"),
           max(futuro$semana) == yearweek("2026 W42"),
           !anyNA(futuro$dias_equiv))
 
-equipo_1 <- fit_final |> forecast(new_data = futuro)
+# 1. Obtenemos los pronósticos de los 3 modelos por separado
+fc_base <- fit_final |> forecast(new_data = futuro)
+
+# 2. Promediamos las predicciones y reconstruimos el formato "fable"
+equipo_1 <- fc_base |>
+  as_tibble() |>
+  group_by(semana) |>
+  summarise(
+    .mean = mean(.mean, na.rm = TRUE),
+    # Promediamos la varianza para mantener los intervalos en la gráfica
+    sigma = sqrt(mean(distributional::variance(total), na.rm = TRUE)), 
+    .groups = "drop"
+  ) |>
+  mutate(
+    .model = "equipo_1",
+    total  = distributional::dist_normal(.mean, sigma)
+  ) |>
+  as_tsibble(index = semana, key = .model) |>
+  as_fable(response = "total", distribution = total)
 
 validar_entrega(equipo_1, "equipo_1")
 save(equipo_1, file = "equipo_1.RData")
