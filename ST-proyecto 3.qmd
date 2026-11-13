@@ -1,0 +1,348 @@
+---
+title: "Proyecto M3"
+format: html
+---
+
+```{r}
+#| label: setup
+#| message: false
+library(fpp3)
+library(timeDate)
+library(future)
+set.seed(2026)
+load("ventas_semana_train.RData")
+```
+
+# Datos
+
+
+```{r}
+#| label: datos
+ventas_semana_train |> autoplot(total) +
+  labs(x = "Semana", y = "Ventas (pesos)")
+
+ventas_semana_train |> summarise(inicio = min(semana), fin = max(semana), n = n())
+```
+
+# Regresores
+
+## Calendario
+
+Festivos considerados: los obligatorios del art. 74 de la Ley Federal del Trabajo, más Jueves y Viernes Santo. Horario: lunes a viernes 10 a 19 h (9 h), sábado 10 a 15 h (5 h), domingo cerrado.
+
+```{r}
+#| label: calendario
+n_dia_mes <- function(anio, mes, dia_sem, n) {
+  d <- seq(make_date(anio, mes, 1), make_date(anio, mes, 28) + 3, by = "day")
+  d <- d[month(d) == mes & wday(d, week_start = 1) == dia_sem]
+  d[n]
+}
+
+anios <- 2021:2027
+
+tabla_festivos <- bind_rows(lapply(anios, \(a) {
+  pascua <- as.Date(Easter(a))
+  tibble(
+    fecha = c(make_date(a, 1, 1), n_dia_mes(a, 2, 1, 1), n_dia_mes(a, 3, 1, 3),
+              make_date(a, 5, 1), make_date(a, 9, 16), n_dia_mes(a, 11, 1, 3),
+              make_date(a, 12, 25), pascua - 3, pascua - 2),
+    festivo = c("Año Nuevo", "Día de la Constitución (1er lun feb)",
+                "Natalicio de Benito Juárez (3er lun mar)", "Día del Trabajo",
+                "Independencia", "Revolución (3er lun nov)", "Navidad",
+                "Jueves Santo", "Viernes Santo")
+  )
+})) |>
+  # Transmision del poder Ejecutivo: 1 de octubre cada seis años (LFT art. 74)
+  bind_rows(tibble(fecha = as.Date("2024-10-01"),
+                   festivo = "Transmisión del Poder Ejecutivo")) |>
+  arrange(fecha)
+
+festivos      <- tabla_festivos$fecha
+viernes_santo <- as.Date(sapply(anios, \(a) as.Date(Easter(a)) - 2))
+viernes_santo <- as.Date(viernes_santo)
+
+# Festivos que caen en el periodo de evaluacion (W31 a W42 de 2026)
+tabla_festivos |> filter(between(fecha, as.Date("2026-07-27"), as.Date("2026-10-18")))
+
+cal <- tibble(fecha = seq(as.Date("2021-01-04"), as.Date("2027-01-03"), by = "day")) |>
+  mutate(
+    semana  = yearweek(fecha),
+    dsem    = wday(fecha, week_start = 1),
+    festivo = fecha %in% festivos,
+    horas   = case_when(festivo | dsem == 7 ~ 0, dsem == 6 ~ 5, TRUE ~ 9)
+  ) |>
+  group_by(semana) |>
+  summarise(
+    dias_equiv = sum(horas) / 9,   # semana normal = 5.56
+    nochebuena = as.integer(any(month(fecha) == 12 & day(fecha) == 24)),
+    fin_anio   = as.integer(any(month(fecha) == 12 & day(fecha) == 31)),
+    .groups = "drop"
+  ) |>
+  mutate(
+    semana_santa = as.integer(semana %in% yearweek(viernes_santo)),
+    pascua       = as.integer(semana %in% (yearweek(viernes_santo) + 1))
+  )
+
+ventas <- ventas_semana_train |> left_join(cal, by = "semana")
+stopifnot(!anyNA(ventas$dias_equiv))
+```
+
+## Evidencia de cada regresor
+
+Se descompone la serie con STL (la estacionalidad anual fija ya queda en el componente estacional) y se revisa si el residuo, expresado como % de la tendencia, se relaciona con cada regresor.
+
+```{r}
+#| label: evidencia
+stl_comp <- ventas |>
+  model(STL(total ~ season(period = "year"), robust = TRUE)) |>
+  components()
+
+evidencia <- stl_comp |>
+  as_tibble() |>
+  left_join(cal, by = "semana") |>
+  mutate(rem_pct = 100 * remainder / trend)
+
+# Indicadores: residuo medio (% de la tendencia) con y sin el evento
+evidencia |>
+  pivot_longer(c(semana_santa, pascua, nochebuena, fin_anio),
+               names_to = "regresor", values_to = "activo") |>
+  group_by(regresor, activo) |>
+  summarise(n = n(), rem_pct_media = mean(rem_pct), .groups = "drop")
+
+# Dias equivalentes de venta: pendiente sobre el residuo
+coef(summary(lm(rem_pct ~ dias_equiv, data = evidencia)))
+
+ggplot(evidencia, aes(dias_equiv, rem_pct, color = factor(semana_santa))) +
+  geom_point(alpha = .7) +
+  geom_smooth(aes(group = 1), method = "lm", se = FALSE, color = "black") +
+  labs(x = "Días de venta equivalentes", y = "Residuo STL (% de la tendencia)",
+       color = "Semana Santa")
+
+# Semanas outliers
+evidencia |>
+  filter(abs(remainder - median(remainder)) > 3 * IQR(remainder)) |>
+  select(semana, total, remainder, dias_equiv)
+```
+
+**Justificación de cada regresor** 
+
+- **`dias_equiv`**: la tienda vende menos cuando hay festivos entre semana. Se espera un efecto positivo. Evidencia: la pendiente del residuo contra días equivalentes (`4.60`). En el horizonte de evaluacion solo el 16 de septiembre (miércoles, W38) reduce días.
+- **`semana_santa`**: se espera una caida mas alla de los dos días cerrados. Es parcialmente colineal con `dias_equiv`, así que su coeficiente mide el efecto adicional. Evidencia: residuo medio de `-16.7` % con el indicador activo.
+- **`pascua`** (semana siguiente, vacaciones): se espera un cambio de demanda. Evidencia: residuo medio de `-0.14` %.
+- **`nochebuena` y `fin_anio`**: se espera un pico de ventas por charolas y eventos de fin de año. Evidencia: residuo medio de `-7.65 y 20.2` % respectivamente.
+- **Fourier (K = 4, periodo 365.25/7)**: captura la estacionalidad anual. El periodo no entero evita el desfase de los años de 52 y 53 semanas.
+- **Outliers**: las semanas outliers de la tabla se se dejan sin dummy porque su valor futuro seria 0 y no aportan informacion al horizonte.
+
+
+
+# Modelado
+
+```{r}
+#| label: modelado-especificaciones
+spec_benchmark <- decomposition_model(
+  STL(total ~ season(period = "year"), robust = TRUE),
+  ARIMA(season_adjust ~ PDQ(0, 0, 0)))
+
+# Mejor modelo sin regresores (tipo M2)
+spec_m2 <- decomposition_model(
+  STL(total ~ season(period = "year"), robust = TRUE),
+  ETS(season_adjust ~ season("N")))
+
+spec_tslm <- TSLM(total ~ trend() + fourier(period = 365.25/7, K = 4) +
+                    dias_equiv + semana_santa + pascua + nochebuena + fin_anio)
+
+spec_arima <- ARIMA(total ~ fourier(period = 365.25/7, K = 4) +
+                      dias_equiv + semana_santa + pascua + nochebuena + fin_anio +
+                      PDQ(0, 0, 0),
+                    stepwise = TRUE, approximation = TRUE)
+```
+
+Verificación de que los modelos con regresores son los que se pretendía especificar:
+
+```{r}
+#| label: modelado-report
+fit_report <- ventas |> model(arima_k4 = spec_arima, tslm_cal = spec_tslm)
+
+fit_report |> select(arima_k4) |> report()
+fit_report |> select(tslm_cal) |> report()
+```
+
+Cross validation de origen movil con **ventana creciente** (`stretch_tsibble`): hay pocos datos (5.5 años) y la estacionalidad anual necesita ciclos completos, por lo que una ventana deslizante descartaria años utiles. Se usa `.init = 156` (3 años), `.step = 8` y horizonte de 12 semanas.
+
+```{r}
+#| label: modelado-cv
+plan(multisession, workers = max(1, parallel::detectCores() - 2))
+
+ventas_cv <- ventas |> stretch_tsibble(.init = 156, .step = 8)
+
+fit_cv <- ventas_cv |>
+  model(
+    benchmark  = spec_benchmark,
+    m2_stl_ets = spec_m2,
+    tslm_cal   = spec_tslm,
+    arima_k4   = spec_arima
+  ) |>
+  mutate(
+    comb_m2_arima = (m2_stl_ets + arima_k4) / 2,
+    comb_3        = (m2_stl_ets + arima_k4 + tslm_cal) / 3
+  )
+```
+
+# Evaluación
+
+
+```{r}
+#| label: evaluacion-pronostico-cv
+futuro_cv <- new_data(ventas_cv, 12) |> left_join(cal, by = "semana")
+fc_cv <- fit_cv |> forecast(new_data = futuro_cv)
+
+plan(sequential)
+```
+
+```{r}
+#| label: evaluacion-mape
+real <- ventas |> as_tibble() |> select(semana, real = total)
+
+errores <- fc_cv |>
+  as_tibble() |>
+  select(.id, .model, semana, .mean) |>
+  inner_join(real, by = "semana") |>
+  group_by(.id, .model) |>
+  mutate(h = row_number()) |>
+  ungroup() |>
+  mutate(ape = abs((real - .mean) / real) * 100)
+
+# MAPE global de todos los candidatos
+mape_global <- errores |>
+  group_by(.model) |>
+  summarise(MAPE = mean(ape), .groups = "drop") |>
+  arrange(MAPE)
+mape_global
+
+# MAPE solo en semanas objetivo W31 a W42 (las semanas que se evalúan)
+mape_ventana <- errores |>
+  filter(between(isoweek(as.Date(semana)), 31, 42)) |>
+  group_by(.model) |>
+  summarise(MAPE_W31_W42 = mean(ape), .groups = "drop") |>
+  arrange(MAPE_W31_W42)
+mape_ventana
+
+# MAPE por horizonte
+errores |>
+  group_by(.model, h) |>
+  summarise(MAPE = mean(ape), .groups = "drop") |>
+  ggplot(aes(h, MAPE, color = .model)) + geom_line() +
+  labs(x = "Horizonte (semanas)", y = "MAPE (%)")
+```
+
+## Pregunta central: ¿cuanto aporta el contexto?
+
+Comparacion de los tres modelos: el final, el benchmark y el mejor sin regresores.
+
+```{r}
+#| label: evaluacion-tres-modelos
+final_cv <- "comb_3" 
+sin_reg  <- c("m2_stl_ets")   
+
+mejor_sin_reg <- mape_global |> filter(.model %in% sin_reg) |> slice(1) |> pull(.model)
+
+comparacion <- mape_global |>
+  filter(.model %in% c("benchmark", mejor_sin_reg, final_cv)) |>
+  left_join(mape_ventana, by = ".model") |>
+  mutate(rol = case_when(.model == "benchmark"  ~ "Benchmark",
+                         .model == mejor_sin_reg ~ "Mejor sin regresores",
+                         .model == final_cv      ~ "Modelo final"))
+comparacion
+
+mape_bench <- comparacion |> filter(rol == "Benchmark") |> pull(MAPE)
+mape_final <- comparacion |> filter(rol == "Modelo final") |> pull(MAPE)
+mape_sinr  <- comparacion |> filter(rol == "Mejor sin regresores") |> pull(MAPE)
+
+tibble(
+  mejora_vs_benchmark_pct   = 100 * (mape_bench - mape_final) / mape_bench,
+  mejora_vs_sin_regresores_pct = 100 * (mape_sinr - mape_final) / mape_sinr
+)
+
+if (mape_final >= mape_bench) warning("El modelo final NO supera al benchmark en MAPE.")
+if (mape_global$.model[1] != final_cv) warning("El mejor MAPE global NO es el modelo final.")
+```
+
+**Conclusión:** (redacta aquí cuánto mejora el contexto. Si el contexto no mejora al mejor modelo sin regresores, repórtalo y explica que en W31 a W42 no hay Semana Santa ni fin de año y solo cambia `dias_equiv` por el 16 de septiembre).
+
+# Pronóstico final
+
+El modelo final es la combinación (promedio) de de 'spec_m2', 'spec_arima' y 'spec_tslm', estimada con todos los datos. Los regresores futuros se calculan sin incertidumbre a partir del calendario.
+
+```{r}
+#| label: pronostico-final
+validar_entrega <- function(fc, nombre, maestria = FALSE,
+                            inicio = yearweek("2026 W31")) {
+  semanas_esperadas <- inicio + 0:11
+  problemas <- character()
+
+  if (!inherits(fc, "fbl_ts")) {
+    stop("El objeto no es un fable (fbl_ts). Debe ser la salida de forecast().")
+  }
+
+  idx <- fc[[index_var(fc)]]
+  if (!inherits(idx, "yearweek")) {
+    problemas <- c(problemas, "El indice no es de clase yearweek.")
+  }
+
+  modelos <- unique(fc$.model)
+  if (length(modelos) != 1 || modelos[1] != nombre) {
+    problemas <- c(problemas, sprintf(
+      "Debe haber un solo modelo llamado '%s'. Se encontró: %s",
+      nombre, paste(modelos, collapse = ", ")
+    ))
+  }
+
+  if (nrow(fc) != 12 ||
+      !isTRUE(all.equal(sort(as.Date(idx)), as.Date(semanas_esperadas)))) {
+    problemas <- c(problemas,
+      paste("El pronostico debe cubrir exactamente 12 semanas, de",
+            format(inicio), "a", format(inicio + 11)))
+  }
+
+  if (!identical(response_vars(fc), "total")) {
+    problemas <- c(problemas, "La variable pronosticada debe llamarse 'total'.")
+  }
+
+  if (anyNA(fc$.mean) || any(fc$.mean <= 0)) {
+    problemas <- c(problemas, "Hay pronosticos faltantes, negativos o en cero.")
+  }
+
+  if (maestria) {
+    v <- distributional::variance(fc[[distribution_var(fc)]])
+    if (anyNA(v) || any(v <= 0)) {
+      problemas <- c(problemas,
+        "La distribucion del pronostico es degenerada: no hay intervalos válidos.")
+    }
+  }
+
+  if (length(problemas) == 0) {
+    message("Entrega valida.")
+  } else {
+    stop(paste0("Error", problemas, collapse = "\n"))
+  }
+  invisible(TRUE)
+}
+
+fit_final <- ventas |>
+  model(m2 = spec_m2, arima_k4 = spec_arima, tslm_cal = spec_tslm) |>
+  mutate(equipo_1 = (m2 + arima_k4 + tslm_cal) / 3) |>
+  select(equipo_1)
+
+futuro <- new_data(ventas, 12) |> left_join(cal, by = "semana")
+stopifnot(min(futuro$semana) == yearweek("2026 W31"),
+          max(futuro$semana) == yearweek("2026 W42"),
+          !anyNA(futuro$dias_equiv))
+
+equipo_1 <- fit_final |> forecast(new_data = futuro)
+
+validar_entrega(equipo_1, "equipo_1")
+save(equipo_1, file = "equipo_1.RData")
+
+equipo_1 |> autoplot(ventas |> filter(semana >= yearweek("2025 W01"))) +
+  labs(x = "Semana", y = "Ventas (pesos)")
+```
